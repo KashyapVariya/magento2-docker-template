@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#
+# bin/shell — open an interactive bash shell inside the php container,
+# dropped into /var/www/public_html.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+docker compose exec --user www-data php bash

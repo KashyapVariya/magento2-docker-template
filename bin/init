@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+#
+# bin/init <shop_name>
+#
+# Renames this template folder to <shop_name> (a sibling folder, so the template
+# itself stays clean and reusable for the next shop), then, if public_html/ is
+# empty, interactively asks for the Magento version, PHP version, and search
+# engine to use -- validates all of it against lib/versions.tsv (Adobe's official
+# support matrix) -- and installs Magento.
+#
+# An unsupported PHP-version / search-engine choice for the chosen Magento version
+# is a hard error: this script never silently proceeds on an unsupported combo.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+# When `init` is run from a folder not already named after the shop (e.g. a fresh
+# clone of this template), rename that folder itself to the shop name so the
+# project lives where it was cloned instead of spawning a separate directory.
+scaffold_shop_dir() {
+    local project_name="$1"
+    local target_dir="${PROJECT_ROOT%/*}/${project_name}"
+
+    if [ "$(basename "$PROJECT_ROOT")" = "$project_name" ]; then
+        echo "$PROJECT_ROOT"
+        return
+    fi
+
+    [ -e "$target_dir" ] && die "Target directory already exists: $target_dir"
+
+    echo "==> Renaming project folder to: $target_dir" >&2
+    mv "$PROJECT_ROOT" "$target_dir"
+
+    echo "$target_dir"
+}
+
+# Interactively choose Magento / PHP / search-engine versions, validate them
+# against lib/versions.tsv, and persist the whole resolved combination to .env.
+prompt_versions() {
+    echo ""
+    echo "==> Choose versions for this shop (press Enter to keep the default)"
+    read -rp "  Magento version [${MAGENTO_VERSION}] (2.4-develop = GitHub, anything else = Marketplace): " mage_in
+    local new_magento="${mage_in:-$MAGENTO_VERSION}"
+
+    local php_list mariadb opensearch elasticsearch composer row
+    if row="$(versions_lookup "$new_magento")"; then
+        IFS=$'\t' read -r php_list mariadb opensearch elasticsearch composer <<< "$row"
+    else
+        echo "  Warning: unrecognized Magento version '${new_magento}' -- cannot verify dependency compatibility, proceeding as-is."
+        php_list=""
+        mariadb="$MARIADB_VERSION"
+        opensearch="$OPENSEARCH_VERSION"
+        elasticsearch="-"
+        composer="${COMPOSER_VERSION:-2}"
+    fi
+
+    local new_php
+    if [ -n "$php_list" ]; then
+        # Only the PHP versions Adobe lists as supported for this Magento version
+        # are ever offered -- an incompatible one can't be typed in.
+        local php_options=()
+        IFS=',' read -ra php_options <<< "$php_list"
+        choose_from_list "PHP version" "${php_options[@]}"
+        new_php="$REPLY_VALUE"
+    else
+        echo "  No known PHP compatibility list for '${new_magento}' -- enter one manually."
+        read -rp "  PHP version [${PHP_VERSION}]: " php_in
+        new_php="${php_in:-$PHP_VERSION}"
+    fi
+
+    # Only engines lib/versions.tsv marks as actually available (column != "-") are
+    # ever offered -- e.g. 2.4.4/2.4.5 have no native "opensearch" `setup:install`
+    # value at all (see lib/versions.tsv's own comment), so only Elasticsearch is
+    # offered there; most versions support both, and get a choice. When both are
+    # available, whichever engine is already configured (from a prior run) becomes
+    # the default.
+    local opensearch_ok="" elasticsearch_ok=""
+    [ -n "$opensearch" ] && [ "$opensearch" != "-" ] && opensearch_ok=1
+    [ -n "$elasticsearch" ] && [ "$elasticsearch" != "-" ] && elasticsearch_ok=1
+
+    local engine_options=()
+    if [ -n "$opensearch_ok" ] && [ -n "$elasticsearch_ok" ]; then
+        if [ "${SEARCH_ENGINE:-}" = "elasticsearch" ]; then
+            engine_options=("elasticsearch" "opensearch")
+        else
+            engine_options=("opensearch" "elasticsearch")
+        fi
+    elif [ -n "$opensearch_ok" ]; then
+        engine_options=("opensearch")
+    elif [ -n "$elasticsearch_ok" ]; then
+        engine_options=("elasticsearch")
+    else
+        die "Neither OpenSearch nor Elasticsearch is listed as available for Magento ${new_magento} in lib/versions.tsv."
+    fi
+    choose_from_list "search engine" "${engine_options[@]}"
+    local new_engine="$REPLY_VALUE"
+
+    local search_version
+    if [ "$new_engine" = "elasticsearch" ]; then
+        search_version="$elasticsearch"
+    else
+        search_version="$opensearch"
+    fi
+
+    sed -i "s/^MAGENTO_VERSION=.*/MAGENTO_VERSION=${new_magento}/" "$ENV_FILE"
+    sed -i "s/^PHP_VERSION=.*/PHP_VERSION=${new_php}/" "$ENV_FILE"
+    set_env_var SEARCH_ENGINE "$new_engine"
+    set_env_var COMPOSE_PROFILES "$new_engine"
+    set_env_var MARIADB_VERSION "$mariadb"
+    set_env_var COMPOSER_VERSION "$composer"
+    if [ "$new_engine" = "elasticsearch" ]; then
+        set_env_var ELASTICSEARCH_VERSION "$search_version"
+    else
+        set_env_var OPENSEARCH_VERSION "$search_version"
+    fi
+    load_env
+
+    if [ "$MAGENTO_VERSION" = "2.4-develop" ]; then
+        echo "==> Using Magento 2.4-develop from ${MAGENTO_REPO_URL} on PHP ${PHP_VERSION}"
+    else
+        echo "==> Using Magento ${MAGENTO_VERSION} from the Adobe Commerce Marketplace on PHP ${PHP_VERSION}"
+    fi
+    echo "==> Matching dependency versions: MariaDB ${MARIADB_VERSION}, $(search_engine_label) ${search_version}, Composer ${COMPOSER_VERSION}"
+}
+
+# Interactively choose the domain this shop answers to (default: localhost),
+# persists it into BASE_URL, and -- if it's a custom domain, not localhost --
+# points it at this machine by adding it to /etc/hosts (prompts for sudo right
+# here). bin/certs (called later, right before nginx starts) reads BASE_URL and
+# regenerates the HTTPS cert to cover whatever domain ends up here, automatically.
+prompt_domain() {
+    local current_host
+    current_host="$(base_url_host)"
+    echo ""
+    read -rp "  Domain for this shop [${current_host}] (a custom one, e.g. store1.test -- you'll be asked for sudo to add it to /etc/hosts): " domain_in
+    local new_host="${domain_in:-$current_host}"
+    set_env_var BASE_URL "http://${new_host}/"
+    load_env
+    ensure_hosts_entry
+}
+
+ensure_composer_auth() {
+    if php_exec_t composer global config http-basic.repo.magento.com >/dev/null 2>&1; then
+        return
+    fi
+    echo ""
+    echo "Adobe Commerce Marketplace authentication keys are required to download Magento."
+    echo "Get yours at: https://commercemarketplace.adobe.com/customer/accessKeys/"
+    echo "(These are stored once on this machine and reused for every project built from this template.)"
+    read -rp "  Public key:  " mp_public_key
+    read -rsp "  Private key: " mp_private_key
+    echo ""
+    php_exec_t composer global config http-basic.repo.magento.com "$mp_public_key" "$mp_private_key"
+}
+
+project_name="${1:-}"
+[ -n "$project_name" ] || die "Usage: ./magento init <shop_name>"
+
+project_name="$(printf '%s' "$project_name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+[ -n "$project_name" ] || die "Shop name must contain at least one letter or digit"
+
+target_dir="$(scaffold_shop_dir "$project_name")"
+cd "$target_dir"
+
+load_env
+
+echo "==> Setting project name to '${project_name}'"
+sed -i "s/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=${project_name}/" "$ENV_FILE"
+load_env
+
+rm -f public_html/.gitkeep
+fresh_install=""
+[ -z "$(ls -A public_html 2>/dev/null)" ] && fresh_install=1
+
+if [ -n "$fresh_install" ]; then
+    prompt_versions
+    prompt_domain
+fi
+
+echo "==> Building php image (PHP ${PHP_VERSION}, Composer ${COMPOSER_VERSION})"
+docker compose build php
+
+echo "==> Starting infrastructure services"
+docker compose up -d db redis "${SEARCH_ENGINE}" mailpit phpmyadmin
+
+wait_for_db
+wait_for_search
+
+bin/certs
+
+docker compose up -d php nginx
+
+if [ -n "$fresh_install" ]; then
+    if [ "$MAGENTO_VERSION" = "2.4-develop" ]; then
+        # No specific version was requested -- default to the GitHub development branch.
+        echo "==> Cloning Magento (2.4-develop) from ${MAGENTO_REPO_URL}"
+        php_exec_t git clone --branch "${MAGENTO_VERSION}" --single-branch --depth 1 \
+            "${MAGENTO_REPO_URL}" .
+
+        ensure_composer_auth
+
+        echo "==> Installing Composer dependencies (this takes a while)"
+        php_exec_t composer install
+    else
+        # A specific version was requested -- pull the tagged release from the Adobe
+        # Commerce Marketplace, same as before.
+        ensure_composer_auth
+
+        echo "==> Installing Magento ${MAGENTO_VERSION} via Composer (Marketplace)"
+        php_exec_t composer create-project --repository-url=https://repo.magento.com/ \
+            "magento/project-community-edition=${MAGENTO_VERSION}" /var/www/public_html
+    fi
+
+    # Magento's setup:install --search-engine value for Elasticsearch encodes its
+    # major version ("elasticsearch7" or "elasticsearch8" -- see
+    # setup/src/Magento/Setup/Model/SearchConfigOptionsList.php), which differs by
+    # Magento version (lib/versions.tsv: 7.17.x for 2.4.4-2.4.6, 8.x for 2.4.7/2.4.8)
+    # -- derived from ELASTICSEARCH_VERSION so this can never drift from whichever
+    # image tag ./magento init actually picked.
+    if [ "$SEARCH_ENGINE" = "elasticsearch" ]; then
+        es_major="${ELASTICSEARCH_VERSION%%.*}"
+        search_install_args=(--search-engine="elasticsearch${es_major}" --elasticsearch-host=elasticsearch --elasticsearch-port=9200)
+    else
+        search_install_args=(--search-engine=opensearch --opensearch-host=opensearch --opensearch-port=9200)
+    fi
+
+    echo "==> Running bin/magento setup:install"
+    php_exec_t bin/magento setup:install \
+        --base-url="${BASE_URL}" \
+        --db-host=db --db-name="${MYSQL_DATABASE}" --db-user="${MYSQL_USER}" --db-password="${MYSQL_PASSWORD}" \
+        --admin-firstname="${ADMIN_FIRSTNAME}" --admin-lastname="${ADMIN_LASTNAME}" \
+        --admin-email="${ADMIN_EMAIL}" --admin-user="${ADMIN_USER}" --admin-password="${ADMIN_PASSWORD}" \
+        --language="${LANGUAGE}" --currency="${CURRENCY}" --timezone="${TIMEZONE}" --use-rewrites=1 \
+        --backend-frontname="${ADMIN_FRONTNAME:-admin}" \
+        "${search_install_args[@]}" \
+        --cache-backend=redis --cache-backend-redis-server=redis --cache-backend-redis-db=0 \
+        --page-cache=redis --page-cache-redis-server=redis --page-cache-redis-db=1 \
+        --session-save=redis --session-save-redis-host=redis --session-save-redis-db=2
+
+    php_exec_t bin/magento deploy:mode:set developer
+
+    # Static content signing (dev/static/sign) puts a "version.../" prefix on admin/frontend
+    # asset URLs. In developer mode, requests for that versioned path get routed through
+    # static.php for on-demand generation -- which cannot resolve RequireJS's synthetic
+    # files (requirejs-config.js and everything it aliases: jquery/ui, prototype,
+    # jquery-ui-modules/*, text, mageTranslationDictionary). That 404s requirejs-config.js,
+    # so none of its path aliases register, cascading into a pile of "Script error for ..."
+    # console errors and an admin panel stuck on the loading spinner. Disabling signing here
+    # avoids the whole failure mode for local dev.
+    php_exec_t bin/magento config:set dev/static/sign 0
+
+    # These two-factor-auth modules exist on some Magento versions and not others
+    # (Magento_AdminAdobeImsTwoFactorAuth in particular has been renamed/removed
+    # across releases) -- disabling them avoids 2FA locking you out of the local
+    # admin on versions that ship them. `module:disable` exits non-zero if none of
+    # the given modules exist, which under `set -e` would otherwise abort the whole
+    # install over what's actually good news (no 2FA module to worry about here).
+    if ! php_exec_t bin/magento module:disable Magento_AdminAdobeImsTwoFactorAuth Magento_TwoFactorAuth 2>&1; then
+        echo "==> Note: no 2FA module found to disable on this Magento version -- nothing to do here."
+    fi
+
+    php_exec_t bin/magento setup:upgrade
+    # Developer mode is supposed to generate Proxy/Factory/Interceptor classes on demand on
+    # first request, but that on-the-fly generation is flaky under PHP-FPM's multiple
+    # workers (a request can hit "Class ...Proxy does not exist" if two workers race to
+    # generate the same class). Compiling once up front means every class already exists,
+    # so the very first admin page load never hits that 500.
+    php_exec_t bin/magento setup:di:compile
+
+    php_exec_t bin/magento setup:static-content:deploy -f
+    php_exec_t bin/magento indexer:reindex
+    php_exec_t bin/magento cache:flush
+else
+    echo "==> public_html/ is not empty, skipping Magento installation"
+fi
+
+print_urls
+echo ""
+echo "  cd '${target_dir}' to work on this shop from now on."

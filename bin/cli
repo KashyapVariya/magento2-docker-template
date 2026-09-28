@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#
+# bin/cli <bin/magento arguments> — run bin/magento inside the php container.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+[ $# -gt 0 ] || die "Usage: ./magento cli <bin/magento arguments>"
+php_exec bin/magento "$@"

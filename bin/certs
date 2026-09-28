@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#
+# bin/certs -- generates a browser-trusted local HTTPS certificate for this shop via
+# mkcert (https://github.com/FiloSottile/mkcert), covering localhost/127.0.0.1/::1
+# plus BASE_URL's own domain (see base_url_host in lib/common.sh) -- e.g. set
+# BASE_URL=http://store1.test/ in .env for a custom virtual host, and this picks it
+# up automatically. nginx's :443 listener (docker/nginx/default.conf) then serves
+# https:// for all of those with no "not secure" warning -- unlike a plain
+# self-signed cert, mkcert's CA gets installed into your OS/browser trust stores,
+# so this one is actually trusted, not just present.
+#
+# Safe to call on every ./magento init/start: a no-op unless the set of domains has
+# actually changed since the last time (tracked in docker/nginx/certs/.domains), so
+# it never re-prompts or re-generates needlessly.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+load_env
+
+CERT_DIR="docker/nginx/certs"
+CERT_FILE="${CERT_DIR}/cert.pem"
+KEY_FILE="${CERT_DIR}/key.pem"
+DOMAINS_FILE="${CERT_DIR}/.domains"
+
+# Always-included fallbacks, plus whatever BASE_URL's domain is (deduplicated --
+# a plain "http://localhost/" BASE_URL shouldn't list "localhost" twice).
+domains=(localhost 127.0.0.1 ::1)
+custom_host="$(base_url_host)"
+case "$custom_host" in
+    localhost|127.0.0.1|::1|"") ;;
+    *) domains+=("$custom_host") ;;
+esac
+
+wanted="${domains[*]}"
+current=""
+[ -f "$DOMAINS_FILE" ] && current="$(cat "$DOMAINS_FILE")"
+
+if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ] && [ "$wanted" = "$current" ]; then
+    exit 0
+fi
+
+command -v mkcert >/dev/null 2>&1 || die "mkcert is required for local HTTPS but isn't installed. Install it from https://github.com/FiloSottile/mkcert and re-run './magento certs' (or './magento init')."
+
+mkdir -p "$CERT_DIR"
+
+echo "==> Installing mkcert's local CA into your system/browser trust stores (one-time; may ask for your password)"
+mkcert -install
+
+echo "==> Generating a locally-trusted HTTPS certificate for: ${wanted}"
+mkcert -cert-file="$CERT_FILE" -key-file="$KEY_FILE" "${domains[@]}"
+printf '%s' "$wanted" > "$DOMAINS_FILE"
+
+ensure_hosts_entry

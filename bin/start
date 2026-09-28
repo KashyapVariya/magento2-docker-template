@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# bin/start — start all containers for this shop and print their URLs.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+load_env
+bin/certs
+docker compose up -d
+print_urls

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#
+# bin/status — show container status for this shop.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+docker compose ps

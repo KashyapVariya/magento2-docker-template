@@ -1,0 +1,49 @@
+# Magento <-> dependency compatibility matrix. Single source of truth for
+# bin/init -- read by lib/versions.sh, which every bin/ script relies on so
+# there's never more than one place that knows these numbers.
+#
+# Source: https://experienceleague.adobe.com/en/docs/commerce-operations/installation-guide/system-requirements
+# (cross-checked against the "php" platform constraint in magento/magento2's
+# composer.json for each tag, and against setup/.../SearchConfigOptionsList.php
+# for which search-engine options each version actually ships).
+#
+# Columns are TAB-separated:
+#   version        Magento version, as a boundary-aware prefix (see versions_prefix_match
+#                  in versions.sh). "2.4.7" matches "2.4.7", "2.4.7-p10", "2.4.7.0" --
+#                  but NOT "2.4.70".
+#   php            Comma-separated list of officially supported PHP versions. The first
+#                  one listed becomes the suggested default at the init prompt.
+#   mariadb        MariaDB image tag to run for this Magento version. Auto-selected --
+#                  never prompted for.
+#   opensearch     OpenSearch image tag to run when the OpenSearch engine is chosen, or
+#                  "-" if this version's `setup:install --search-engine=` has no
+#                  "opensearch" value at all (bin/init then never offers it).
+#   elasticsearch  Elasticsearch image tag to run when the Elasticsearch engine is chosen,
+#                  or "-" if Adobe does not list Elasticsearch as supported for this
+#                  version (bin/init then refuses that choice with an error).
+#   composer       Composer version to install into the php image.
+#
+# Rows are matched top-to-bottom; the first match wins. Keep more specific prefixes
+# above less specific ones (every prefix below is currently disjoint, so order is not
+# load-bearing yet, but a future "2.4" catch-all row would need to go last).
+#
+# A native "opensearch" engine value was only added to `setup:install` in 2.4.6 (see
+# setup/src/Magento/Setup/Model/SearchConfigOptionsList.php at each git tag -- 2.4.4
+# and 2.4.5 only ever list elasticsearch5/6/7, on every patch level up to the last one
+# mirrored on GitHub). Adobe's system-requirements page still lists "OpenSearch 2.19"
+# for 2.4.4/2.4.5 because OpenSearch 2.x is wire-compatible with the ES 7.x client
+# Magento uses there -- you can point that same elasticsearch7 engine at an OpenSearch
+# host and it works, but there's no distinct "opensearch" value to pass, so bin/init
+# doesn't offer it as a separate choice for those two versions (elasticsearch is the
+# only -- and correct -- option there). Elasticsearch's own version column below drives
+# the `--search-engine=elasticsearch<major>` value bin/init passes (see bin/init) --
+# always keep it as an actual "<major>.<minor>.<patch>" tag, never a bare major number.
+#
+# version	php	mariadb	opensearch	elasticsearch	composer
+2.4-develop	8.3,8.4,8.5	11.8	3.8.0	-	2.10
+2.4.9	8.5	11.8	3.8.0	-	2.10
+2.4.8	8.3,8.4	11.4	3.8.0	8.11.0	2.10
+2.4.7	8.2,8.3	10.11	2.19.4	8.11.0	2.10
+2.4.6	8.1,8.2	10.11	2.19.4	7.17.5	2.2
+2.4.5	8.1	10.11	-	7.17.5	2.2
+2.4.4	8.1	10.6	-	7.17.5	2.2

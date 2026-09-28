@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#
+# bin/xdebug [on|off] -- toggles Xdebug by flipping XDEBUG_MODE in .env and
+# recreating the php container so docker/php/entrypoint.sh re-applies it (it
+# writes xdebug.mode from the env var on every container start -- see
+# docker/php/entrypoint.sh). With no argument, prints the current mode.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+load_env
+
+case "${1:-}" in
+    on)
+        set_env_var XDEBUG_MODE "debug,develop"
+        echo "==> Xdebug enabled (XDEBUG_MODE=debug,develop). Restarting php..."
+        load_env
+        docker compose up -d php
+        ;;
+    off)
+        set_env_var XDEBUG_MODE "off"
+        echo "==> Xdebug disabled. Restarting php..."
+        load_env
+        docker compose up -d php
+        ;;
+    "")
+        echo "Xdebug is currently: ${XDEBUG_MODE:-off}"
+        echo "Usage: ./magento xdebug {on|off}"
+        ;;
+    *)
+        die "Usage: ./magento xdebug {on|off}"
+        ;;
+esac

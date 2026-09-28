@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#
+# bin/destroy — stop and remove containers + volumes (DESTROYS db/search data).
+
+. "$(dirname "$0")/../lib/common.sh"
+
+read -rp "This removes containers AND volumes (DB + search data will be lost). Continue? [y/N] " ans
+case "$ans" in
+    y|Y) docker compose down -v ;;
+    *) echo "Aborted" ;;
+esac

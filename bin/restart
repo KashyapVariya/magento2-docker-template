@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#
+# bin/restart — bin/stop followed by bin/start.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+bin/stop
+bin/start

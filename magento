@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# Control script for this Magento docker template (configurable Magento / PHP /
+# search-engine versions). Each subcommand lives in its own file under bin/ --
+# see lib/common.sh for shared helpers and lib/versions.tsv for the Magento <->
+# PHP / MariaDB / OpenSearch / Elasticsearch / Composer compatibility matrix.
+#
+#   ./magento init <shop_name>      Rename this folder to <shop_name> and install it in place
+#   ./magento certs                 Generate a local HTTPS cert via mkcert (auto-run by init/start)
+#   ./magento start                 Start all containers (prints all service URLs)
+#   ./magento stop                  Stop all containers (keeps data)
+#   ./magento restart               stop + start
+#   ./magento status                Show container status
+#   ./magento shell                 Open a shell in the php container (drops you in /var/www/public_html)
+#   ./magento cli <magento args>    Run bin/magento inside the php container
+#   ./magento n98 <magerun args>    Run n98-magerun2 (github.com/netz98/n98-magerun2) inside the php container
+#   ./magento import-db <file>      Import a .sql/.sql.gz dump into `db`, then setup:upgrade + reindex + cache:flush
+#   ./magento backend               Print the live admin URL (reads the running app's own config, not .env)
+#   ./magento xdebug [on|off]       Toggle Xdebug, or print its current mode with no argument
+#   ./magento logs [service]        Tail logs
+#   ./magento destroy               Stop and remove containers + volumes (DESTROYS db/search data)
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+CMD="${1:-}"
+[ $# -gt 0 ] && shift || true
+
+case "$CMD" in
+    init|certs|start|stop|restart|status|shell|cli|n98|import-db|backend|xdebug|logs|destroy)
+        exec "bin/${CMD}" "$@"
+        ;;
+    *)
+        echo "Usage: ./magento {init <shop_name>|certs|start|stop|restart|status|shell|cli <args>|n98 <args>|import-db <file>|backend|xdebug [on|off]|logs [service]|destroy}"
+        exit 1
+        ;;
+esac

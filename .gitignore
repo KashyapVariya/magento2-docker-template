@@ -1,0 +1,20 @@
+# Local per-project config (copy .env.example to .env)
+.env
+
+# Magento gets installed here per-project by `./magento init` -- the template ships empty
+public_html/*
+!public_html/.gitkeep
+
+# Generated per-machine by `./magento certs` (mkcert) -- never shared, regenerate anywhere
+docker/nginx/certs/*
+!docker/nginx/certs/.gitkeep
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Claude Code's own local session state (lock files, IDs, PIDs) -- machine/session
+# specific, never meant to be shared or committed
+.claude/

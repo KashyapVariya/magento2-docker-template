@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#
+# bin/stop — stop all containers for this shop (data is kept).
+
+. "$(dirname "$0")/../lib/common.sh"
+
+docker compose stop

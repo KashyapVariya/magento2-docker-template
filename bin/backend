@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# bin/backend -- prints the live admin URL: Magento's own current base_url and
+# backend frontName, read from the running app's actual config rather than
+# .env's BASE_URL/ADMIN_FRONTNAME defaults. Those two can drift apart after a
+# raw database import swaps in a different frontName or base_url (see
+# `./magento import-db`) -- this always reflects what the app itself has.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+load_env
+
+base_url="$(php_exec_t bin/magento config:show web/unsecure/base_url 2>/dev/null | tr -d '\r\n')"
+frontname="$(php_exec_t cat app/etc/env.php 2>/dev/null | grep -m1 "'frontName'" | sed -E "s/.*=> *'([^']*)'.*/\1/")"
+
+[ -n "$base_url" ] || base_url="$BASE_URL"
+[ -n "$frontname" ] || frontname="${ADMIN_FRONTNAME:-admin}"
+
+echo "${base_url%/}/${frontname}"

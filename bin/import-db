@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+#
+# bin/import-db <file.sql|file.sql.gz>
+#
+# Imports a SQL dump into the running `db` service, then reconciles Magento
+# with the freshly-swapped data. A raw SQL import bypasses Magento's own
+# tooling entirely -- schema/data patches, the customer/order/product grid
+# index tables, and Redis cache all go stale relative to the new data, which
+# is what makes an otherwise-successful import look like "nothing shows up
+# in the admin". setup:upgrade + indexer:reindex + cache:flush is what fixes
+# that (see README "Importing a database dump").
+#
+# Runs on the HOST, not inside a container -- `db` has no client-side TLS
+# configured and public_html isn't mounted into it, so `docker compose exec`
+# piping the file in from here (via -T) is the reliable path in both
+# directions, and it's also why a bare `mysql`/`mariadb` inside `./magento
+# shell` needs the MYSQL_HOST/MYSQL_PWD env vars set on the php service.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+dump_file="${1:-}"
+[ -n "$dump_file" ] || die "Usage: ./magento import-db <file.sql|file.sql.gz>"
+[ -f "$dump_file" ] || die "File not found: $dump_file"
+
+load_env
+
+echo "==> Importing ${dump_file} into database '${MYSQL_DATABASE}' (this can take a while for a large dump)"
+case "$dump_file" in
+    *.gz)
+        gunzip -c "$dump_file" | docker compose exec -T db mariadb -uroot -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DATABASE}"
+        ;;
+    *)
+        docker compose exec -T db mariadb -uroot -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DATABASE}" < "$dump_file"
+        ;;
+esac
+
+echo "==> Reconciling Magento with the newly-imported data"
+php_exec_t bin/magento setup:upgrade
+php_exec_t bin/magento indexer:reindex
+php_exec_t bin/magento cache:flush
+
+# A raw dump carries the SOURCE deployment's own settings for these three, and each one
+# breaks local dev in its own way -- confirmed by hitting all three across real imports:
+#   - dev/static/sign: a dump rarely has this row at all, so it silently falls back to
+#     Magento's default (signed static URLs). In developer mode that 404s
+#     requirejs-config.js specifically (static.php can't generate RequireJS's synthetic
+#     files on demand), cascading into "Script error for ..." on every admin page.
+#   - web/*/base_url: sourced from wherever the dump's site actually lives (a different
+#     domain, or a subpath like "/admin") -- every generated URL breaks locally, and a
+#     per-store-view override (scope_id != 0) can win even after the default scope is
+#     fixed, which is why those get cleared too, not just reset.
+#   - catalog/search/*: sourced from the dump's own search cluster (a different engine,
+#     a remote host, auth credentials) instead of this stack's local search service.
+# All three are safe to force to this shop's own .env values -- unlike setup:upgrade
+# failures (e.g. a custom module's schema conflicting with a core patch), there's no
+# app-specific judgment call needed here, so it's fine to always do this after an import.
+echo "==> Resetting settings a raw import typically overwrites with the source site's own values"
+php_exec_t bin/magento config:set dev/static/sign 0
+
+php_exec_t bin/magento config:set web/unsecure/base_url "${BASE_URL}"
+php_exec_t bin/magento config:set web/secure/base_url "${BASE_URL}"
+docker compose exec -T db mariadb -uroot -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DATABASE}" -e \
+    "DELETE FROM core_config_data WHERE path IN ('web/unsecure/base_url','web/secure/base_url') AND scope_id != 0;"
+
+# This stack has no HTTPS listener at all (docker/nginx/default.conf only ever binds
+# port 80), so these two must stay off: a real deployment's dump often carries them as 1,
+# which is harmless only as long as secure_base_url also stays http:// (forced above) --
+# if a future dump ever brings in an actual https:// secure_base_url, leaving these on
+# would make Magento generate unreachable https:// links for checkout/customer/admin.
+# A fresh local install never enables them in the first place (bin/init's setup:install
+# never passes --use-secure), so 0 is just restoring that same default.
+php_exec_t bin/magento config:set web/secure/use_in_frontend 0
+php_exec_t bin/magento config:set web/secure/use_in_adminhtml 0
+
+# A dump's cookie_domain is often the real site's own domain (e.g. ".example.com") to
+# share cookies across subdomains -- browsers silently drop a cookie whose Domain
+# attribute doesn't match the current host, so that would break login/session
+# persistence on localhost. Empty string is the safe default: it lets the browser
+# default the cookie to the exact current host instead of a fixed domain.
+php_exec_t bin/magento config:set web/cookie/cookie_domain ""
+
+if [ "$SEARCH_ENGINE" = "elasticsearch" ]; then
+    # The engine identifier (and the config path fields under it) encode the ES major
+    # version -- "elasticsearch7" vs "elasticsearch8", see setup/.../SearchConfigOptionsList.php
+    # -- which differs by Magento version (lib/versions.tsv). Derived from
+    # ELASTICSEARCH_VERSION so this stays consistent with whatever bin/init's own
+    # setup:install would have configured on a fresh install of this same codebase.
+    es_major="${ELASTICSEARCH_VERSION%%.*}"
+    php_exec_t bin/magento config:set catalog/search/engine "elasticsearch${es_major}"
+    php_exec_t bin/magento config:set "catalog/search/elasticsearch${es_major}_server_hostname" elasticsearch
+    php_exec_t bin/magento config:set "catalog/search/elasticsearch${es_major}_server_port" 9200
+    php_exec_t bin/magento config:set "catalog/search/elasticsearch${es_major}_enable_auth" 0
+else
+    php_exec_t bin/magento config:set catalog/search/engine opensearch
+    php_exec_t bin/magento config:set catalog/search/opensearch_server_hostname opensearch
+    php_exec_t bin/magento config:set catalog/search/opensearch_server_port 9200
+    php_exec_t bin/magento config:set catalog/search/opensearch_enable_auth 0
+fi
+
+php_exec_t bin/magento cache:flush
+
+echo "==> Import complete."
+echo "    Admin URL: $(bin/backend)"

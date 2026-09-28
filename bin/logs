@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#
+# bin/logs [service] — tail docker compose logs (all services, or one).
+
+. "$(dirname "$0")/../lib/common.sh"
+
+docker compose logs -f "${1:-}"

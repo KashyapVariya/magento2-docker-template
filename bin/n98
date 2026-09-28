@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#
+# bin/n98 <n98-magerun2 arguments> -- runs n98-magerun2
+# (https://github.com/netz98/n98-magerun2), a popular third-party Magento CLI
+# that covers things bin/magento doesn't: db:console, dev:console,
+# sys:check, cache:report, dev:module observer list, etc.
+#
+# Uses php_exec (not php_exec_t) so commands that want an interactive
+# terminal -- db:console, dev:console -- get a real one.
+
+. "$(dirname "$0")/../lib/common.sh"
+
+php_exec n98-magerun2.phar "$@"
